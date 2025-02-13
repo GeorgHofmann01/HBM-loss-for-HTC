@@ -139,3 +139,5 @@ ckpt_dataserver
 nohup.*
 config/run_logs/*
 wandb/
+
+rcv1v2/
