@@ -2,5 +2,7 @@ defaults:
   - default
 
 dataset: rcv
-data_dir: data/rcv1v2/pregenerated
-cache_dir: data/rcv1v2/cache-simple
+#data_dir: data/rcv1v2/pregenerated 
+data_dir: data/rcv1v2/pregenerated/train
+test_data_dir: data/rcv1v2/pregenerated/test
+cache_dir: data/rcv1v2/cache-simple # Hier muss auch was gemacht werden

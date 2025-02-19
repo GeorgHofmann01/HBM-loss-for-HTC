@@ -94,10 +94,10 @@ def main(cfg: DictConfig) -> None:
         except:
             pass
         
-        if cfg.do_train:
+        if cfg.do_train: # This is where training starts
             trainer.fit(model, train_dataloader, val_dataloader, cfg.ckpt_path)
         
-        if cfg.do_test:
+        if cfg.do_test: # This is where testing starts
             if cfg.do_train:
                 trainer.test(model, test_dataloader, None)
             elif cfg.ckpt_path is not None:

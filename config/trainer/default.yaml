@@ -1,7 +1,7 @@
 accelerator: cuda
 strategy: ddp
 precision: 16-mixed
-max_epochs: 100
+max_epochs: 50 #100
 max_steps: null
 grad_accum_steps: 1
 validation_frequency: 1
@@ -9,6 +9,6 @@ use_distributed_sampler: true
 gradient_clip_val: 1.0
 deterministic: false
 benchmark: false
-seed: -1
+seed: 42 # -1 # Change this to the following: 42, 129, 238, 678 und 4743
 log_skip: 3
 devices: ???

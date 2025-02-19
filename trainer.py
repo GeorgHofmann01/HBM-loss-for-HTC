@@ -295,7 +295,12 @@ class Trainer:
         if val_loader is not None:
             val_loader = self.fabric.setup_dataloaders(val_loader, use_distributed_sampler=self.use_distributed_sampler)
             
-        while not self.should_stop:
+        #### Early Stopping Parameters ####
+        patience = 10
+        best_val_loss = float('inf')  
+        counter = 0  
+
+        while not self.should_stop: # This is the important loop for early stopping
             self.current_epoch += 1
             self.train_loop(
                 model, 
@@ -306,14 +311,33 @@ class Trainer:
             )
                 
             if self.should_validate_after_epoch:
-                self.val_loop(state, val_loader)
+                val_loss = self.val_loop(state, val_loader) # TODO: Ensure val_loop() returns validation loss
             
+            # Check if validation loss improved
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                counter = 0  # Reset counter if validation improves
+                # Update and save the best model state
+                state["model"] = model.state_dict()
+                state["optim"] = optimizer.state_dict()
+                state["epoch"] = self.current_epoch
+                print(f"Saving best model at epoch {self.current_epoch} with val_loss: {val_loss:.4f}")
+                self.save(state, 'best')  # Save the best model
+            else:
+                counter += 1  # Increment counter if no improvement
+
+            # Early stopping condition
+            if counter >= patience:
+                print(f"Early stopping triggered at epoch {self.current_epoch}")
+                self.should_stop = True
+
+                        
             # stopping condition on epoch level
             if self.max_epochs is not None and self.current_epoch >= self.max_epochs:
                 self.should_stop = True
         
-        if self.fabric.is_global_zero:
-            self.save(state, 'last')
+        #if self.fabric.is_global_zero:
+        #    self.save(state, 'last')
         
         # reset for next fit call
         self.should_stop = False
@@ -429,7 +453,7 @@ class Trainer:
         state: Mapping,
         val_loader: Optional[torch.utils.data.DataLoader],
         limit_batches: Union[int, float] = float("inf"),
-    ) -> None:
+    ) -> float:
         """The validation loop ruunning a single validation epoch.
 
         Args:
@@ -446,6 +470,10 @@ class Trainer:
         model = state['model']
         model.eval()
         torch.set_grad_enabled(False)
+
+        total_loss = 0.0
+        num_batches = 0
+
         
         # self.fabric.call("on_validation_epoch_start")
         for i in range(val_loader.dataset.chunk_count):    
@@ -464,6 +492,11 @@ class Trainer:
                 results = self.postprocessor(batch, output)
                 self.evaluation.update(results["pred_labels"], batch["multi_hot_labels"])
                 # self.fabric.call("on_validation_batch_end", results, batch, batch_idx)
+
+                # Compute loss (Assuming your model has a criterion function)
+                loss = self.criterion(output, batch["multi_hot_labels"]) # TODO: Check is assumtion is true
+                total_loss += loss.item()
+                num_batches += 1
                 
             val_loader = self.reload_dataloader(val_loader, stage="VAL")
         
@@ -487,27 +520,31 @@ class Trainer:
         model.train()
         torch.set_grad_enabled(True)
         
-        if self.fabric.is_global_zero:
-            for monitor in self._train_monitor_logs.keys():
-                new_log = self._train_monitor_logs[monitor][-1].copy()
-                new_log["epoch"] = self.current_epoch
-                new_log["steps"] = self.global_step
-                new_log["value"] = self._val_metric_returns[-1][monitor]
-                self._train_monitor_logs[monitor].append(new_log)
-                valid_prefix = f"Ep{self.current_epoch}/step{self.global_step}"
+        # if self.fabric.is_global_zero:
+        #     for monitor in self._train_monitor_logs.keys():
+        #         new_log = self._train_monitor_logs[monitor][-1].copy()
+        #         new_log["epoch"] = self.current_epoch
+        #         new_log["steps"] = self.global_step
+        #         new_log["value"] = self._val_metric_returns[-1][monitor]
+        #         self._train_monitor_logs[monitor].append(new_log)
+        #         valid_prefix = f"Ep{self.current_epoch}/step{self.global_step}"
                 
-                best_value = self.compare_values(
-                    new_log["value"], 
-                    self._train_monitor_best[monitor]["value"], 
-                    new_log["mode"]
-                )
-                if best_value != self._train_monitor_best[monitor]["value"]:
-                    self._train_monitor_best[monitor]["value"] = best_value
-                    self.fabric.print(f"{valid_prefix} Best {monitor} : {best_value}")
-                    self.save(state, monitor, best_value)
-                else:
-                    self.fabric.print(f"{valid_prefix} {monitor} : {new_log['value']}")
-    
+        #         best_value = self.compare_values(
+        #             new_log["value"], 
+        #             self._train_monitor_best[monitor]["value"], 
+        #             new_log["mode"]
+        #         )
+        #         if best_value != self._train_monitor_best[monitor]["value"]:
+        #             self._train_monitor_best[monitor]["value"] = best_value
+        #             self.fabric.print(f"{valid_prefix} Best {monitor} : {best_value}")
+        #             self.save(state, monitor, best_value)
+        #         else:
+        #             self.fabric.print(f"{valid_prefix} {monitor} : {new_log['value']}")
+
+        # Compute average validation loss
+        avg_val_loss = total_loss / num_batches if num_batches > 0 else float("inf")
+        return avg_val_loss 
+        
     
     def compare_values(self, current_value, best_value, operation="max"):
         if operation == "max":
@@ -669,7 +706,7 @@ class Trainer:
             logger_id=logger_id,
             val_count=self.val_count
         )
-        ckpt_name = f"{prefix}_ep_{self.current_epoch:03d}_steps_{self.global_step}.ckpt"
+        ckpt_name = f"{prefix}_ep_{self.current_epoch:03d}_steps_{self.global_step}.ckpt" # This is where the model is saved
         path = Path(self.checkpoint_dir, 
                     self.cfg.logger.project,
                     self.cfg.dataset_name,
