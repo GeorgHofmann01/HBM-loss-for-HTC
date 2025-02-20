@@ -16,6 +16,7 @@ from src.utils.hierarchy import get_hierarchy
 from src.utils.criterion import get_criterion
 from src.utils.postprocess import get_postprocess
 from src.utils.evaluation import EvaluationConfusionMatrix
+from src.utils.metrics import HierarchicalMetric
 from trainer import Trainer
 
 @hydra.main(version_base="1.1", config_name="main", config_path='config')
@@ -35,6 +36,9 @@ def main(cfg: DictConfig) -> None:
         criterion =  get_criterion(cfg)
         postprocessor = get_postprocess(cfg, hierarchy)
         evaluation = EvaluationConfusionMatrix(cfg.dataset_name, hierarchy.target_metric_mask)
+
+        # HIER DAS ALLES MACHEN WIE IN MEINER KLEINER MAIN METHODE IM ANDEREN REPO
+        hierarchicalmetric = HierarchicalMetric()
 
         dataset_cls = get_dataset(cfg.model.dataset_cls)
         if cfg.do_train:
@@ -83,6 +87,7 @@ def main(cfg: DictConfig) -> None:
             criterion=criterion,
             postprocessor=postprocessor,
             evaluation=evaluation,
+            hierarchicalmetric = hierarchicalmetric,
             loggers=loggers,
         )
         try:

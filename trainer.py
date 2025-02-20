@@ -20,6 +20,9 @@ from lightning_utilities.core.apply_func import apply_to_collection
 
 from omegaconf import DictConfig
 
+import mlflow
+import mlflow.pytorch
+
 
 class Trainer:
     def __init__(
@@ -45,6 +48,7 @@ class Trainer:
         criterion=None,
         postprocessor=None,
         evaluation=None,
+        hierarchicalmetric=None,
     ) -> None:
         """
         * Args:
@@ -128,6 +132,7 @@ class Trainer:
         self.criterion = criterion 
         self.postprocessor = postprocessor 
         self.evaluation = evaluation 
+        self.hierarchicalmetric = hierarchicalmetric
     
         self.max_epochs = max_epochs
         self.max_steps = max_steps    
@@ -265,80 +270,96 @@ class Trainer:
                 If specified, will always look for the latest checkpoint within the given directory.
             with_logger: Load model with wandb logger. If False, use initialized logger.
         """
-        model.train()
-        self.fabric.launch()
-        optimizer, scheduler = self.configure_optimizers(
-            model, train_loader.dataset.total_dataset_size
-        )
-        assert optimizer is not None
-        model, optimizer = self.fabric.setup(model, optimizer)
-        
-        # assemble state (current epoch and global step will be added in save)
-        state = {"model": model, "optim": optimizer, "scheduler": None}
 
-        # load last checkpoint if available
-        if ckpt_path is not None:
-            latest_checkpoint_path = ckpt_path
-            if latest_checkpoint_path is not None:
-                self.load(state, latest_checkpoint_path, with_logger)
+        # Start an MLFlow run
+        with mlflow.start_run():
+            # Log hyperparameters
+            mlflow.log_param("learning_rate", self.learning_rate)
+            mlflow.log_param("batch_size", self.batch_size)
+            mlflow.log_param("epochs", self.max_epochs)
 
-                # check if we even need to train here
+
+            model.train()
+            self.fabric.launch()
+            optimizer, scheduler = self.configure_optimizers(
+                model, train_loader.dataset.total_dataset_size
+            )
+            assert optimizer is not None
+            model, optimizer = self.fabric.setup(model, optimizer)
+            
+            # assemble state (current epoch and global step will be added in save)
+            state = {"model": model, "optim": optimizer, "scheduler": None}
+
+            # load last checkpoint if available
+            if ckpt_path is not None:
+                latest_checkpoint_path = ckpt_path
+                if latest_checkpoint_path is not None:
+                    self.load(state, latest_checkpoint_path, with_logger)
+
+                    # check if we even need to train here
+                    if self.max_epochs is not None and self.current_epoch >= self.max_epochs:
+                        self.should_stop = True
+            else:
+                state['scheduler'] = scheduler
+            print(self.seed)
+            self.set_seed()
+                    
+            # setup dataloaders
+            train_loader = self.fabric.setup_dataloaders(train_loader, use_distributed_sampler=self.use_distributed_sampler)
+            if val_loader is not None:
+                val_loader = self.fabric.setup_dataloaders(val_loader, use_distributed_sampler=self.use_distributed_sampler)
+                
+            #### Early Stopping Parameters ####
+            patience = 10
+            best_val_loss = float('inf')  
+            counter = 0  
+
+            while not self.should_stop: # This is the important loop for early stopping
+                self.current_epoch += 1
+                self.train_loop(
+                    model, 
+                    optimizer, 
+                    train_loader, 
+                    val_loader,
+                    scheduler=scheduler
+                )
+                    
+                if self.should_validate_after_epoch:
+                    val_loss = self.val_loop(state, val_loader) # TODO: Ensure val_loop() returns hierachical macro f1
+                
+                # Log validation loss to MLFlow
+                mlflow.log_metric("val_loss", val_loss)
+                
+                # Check if validation loss improved
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    counter = 0  # Reset counter if validation improves
+                    # Update and save the best model state
+                    state["model"] = model.state_dict()
+                    state["optim"] = optimizer.state_dict()
+                    state["epoch"] = self.current_epoch
+                    print(f"Saving best model at epoch {self.current_epoch} with val_loss: {val_loss:.4f}")
+                    self.save(state, 'best')  # Save the best model
+                    # Log the best model to MLFlow
+                    mlflow.pytorch.log_model(model, "best_model")
+                else:
+                    counter += 1  # Increment counter if no improvement
+
+                # Early stopping condition
+                if counter >= patience:
+                    print(f"Early stopping triggered at epoch {self.current_epoch}")
+                    self.should_stop = True
+                            
+                # stopping condition on epoch level
                 if self.max_epochs is not None and self.current_epoch >= self.max_epochs:
                     self.should_stop = True
-        else:
-            state['scheduler'] = scheduler
-        print(self.seed)
-        self.set_seed()
-                
-        # setup dataloaders
-        train_loader = self.fabric.setup_dataloaders(train_loader, use_distributed_sampler=self.use_distributed_sampler)
-        if val_loader is not None:
-            val_loader = self.fabric.setup_dataloaders(val_loader, use_distributed_sampler=self.use_distributed_sampler)
             
-        #### Early Stopping Parameters ####
-        patience = 10
-        best_val_loss = float('inf')  
-        counter = 0  
+            if self.fabric.is_global_zero:
+                self.save(state, 'last')
 
-        while not self.should_stop: # This is the important loop for early stopping
-            self.current_epoch += 1
-            self.train_loop(
-                model, 
-                optimizer, 
-                train_loader, 
-                val_loader,
-                scheduler=scheduler
-            )
-                
-            if self.should_validate_after_epoch:
-                val_loss = self.val_loop(state, val_loader) # TODO: Ensure val_loop() returns validation loss
+            # Log final model after training
+            mlflow.pytorch.log_model(model, "final_model")
             
-            # Check if validation loss improved
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                counter = 0  # Reset counter if validation improves
-                # Update and save the best model state
-                state["model"] = model.state_dict()
-                state["optim"] = optimizer.state_dict()
-                state["epoch"] = self.current_epoch
-                print(f"Saving best model at epoch {self.current_epoch} with val_loss: {val_loss:.4f}")
-                self.save(state, 'best')  # Save the best model
-            else:
-                counter += 1  # Increment counter if no improvement
-
-            # Early stopping condition
-            if counter >= patience:
-                print(f"Early stopping triggered at epoch {self.current_epoch}")
-                self.should_stop = True
-
-                        
-            # stopping condition on epoch level
-            if self.max_epochs is not None and self.current_epoch >= self.max_epochs:
-                self.should_stop = True
-        
-        #if self.fabric.is_global_zero:
-        #    self.save(state, 'last')
-        
         # reset for next fit call
         self.should_stop = False
 
@@ -448,7 +469,7 @@ class Trainer:
         return dataloader
 
 
-    def val_loop(
+    def val_loop(  #TODO: make sure this calculates the hierarchical Macro F1
         self,
         state: Mapping,
         val_loader: Optional[torch.utils.data.DataLoader],
